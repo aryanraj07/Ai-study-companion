@@ -1,0 +1,13 @@
+
+streamlit
+python-dotenv
+chromadb
+langchain-chroma
+langchain-community
+langchain-core
+langchain-openai
+langchain-text-splitters
+
+pypdf
+streamlit-pdf-viewer
+reportlab
