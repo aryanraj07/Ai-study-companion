@@ -48,6 +48,15 @@ st.markdown(
       div[data-testid="stButton"] button { border-radius: 10px; }
       div[data-testid="stDownloadButton"] button { border-radius: 10px; }
       .small-note { font-size: .85rem; opacity: .72; }
+      [data-testid="stImage"] img { max-width: 100%; height: auto; object-fit: contain; }
+      @media (max-width: 640px) {
+        .block-container { padding-left: .65rem; padding-right: .65rem; padding-top: .8rem; }
+        .hero { padding: 1rem; border-radius: 12px; }
+        .hero h1 { font-size: 1.45rem; }
+        .hero p { font-size: .9rem; }
+        [data-testid="stMetric"] { padding: .5rem; }
+        button, [data-testid="stDownloadButton"] button { width: 100%; }
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -214,37 +223,55 @@ read_tab, ask_tab, study_tab = st.tabs(
 )
 
 with read_tab:
-    st.caption("Scroll through the document to read it. Use your browser zoom controls if needed.")
+    st.caption("Read one page at a time. The page automatically fits the available screen width.")
+
+    # Keep the PDF page image responsive instead of embedding a fixed-width PDF viewer.
+    # This avoids horizontal clipping on phones.
+    nav_left, nav_right = st.columns(2)
+    with nav_left:
+        if st.button(
+            "◀ Previous page",
+            disabled=st.session_state.selected_page <= 1,
+            use_container_width=True,
+            key="pdf_previous_page",
+        ):
+            st.session_state.selected_page = max(1, st.session_state.selected_page - 1)
+    with nav_right:
+        if st.button(
+            "Next page ▶",
+            disabled=st.session_state.selected_page >= total_pages,
+            use_container_width=True,
+            key="pdf_next_page",
+        ):
+            st.session_state.selected_page = min(total_pages, st.session_state.selected_page + 1)
+
+    st.caption(f"Page {st.session_state.selected_page} of {total_pages}")
+
+    try:
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as pdf_doc:
+            page = pdf_doc.load_page(st.session_state.selected_page - 1)
+            # Render at a higher resolution; Streamlit scales it down to the screen width.
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+            page_image = pix.tobytes("png")
+
+        st.image(page_image, use_container_width=True)
+
+    except Exception as exc:
+        st.error("This page could not be displayed.")
+        st.caption(f"Viewer error: {exc}")
+
     st.download_button(
         "Download original PDF",
         data=pdf_bytes,
         file_name=st.session_state.pdf_name,
         mime="application/pdf",
+        use_container_width=True,
     )
 
-    try:
-        from streamlit_pdf_viewer import pdf_viewer
-
-        # Render the original PDF directly with the PDF viewer component.
-        # The previous base64 iframe approach is unreliable in Streamlit because
-        # browser sandboxing often prevents the embedded PDF from appearing.
-        pdf_viewer(
-            input=pdf_bytes,
-            width=1200,
-            height=900,
-        )
-    except Exception as exc:
-        st.error("The PDF preview could not be displayed.")
-        st.caption(f"Viewer error: {exc}")
-        st.info("Use the 'Download original PDF' button above to read it in your PDF app.")
-
     with st.expander("View extracted text (optional)"):
-        selected_page = st.number_input(
-            "Page number", min_value=1, max_value=total_pages, value=1, step=1, key="text_page_number"
-        )
         page_docs = [
             doc for doc in chunks
-            if doc.metadata.get("page") == int(selected_page)
+            if doc.metadata.get("page") == int(st.session_state.selected_page)
         ]
         if page_docs:
             for doc in page_docs:
