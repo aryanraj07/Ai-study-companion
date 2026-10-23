@@ -1,33 +1,63 @@
 import io
 import re
-import streamlit as st
-
-# Pdf download from questions 
-# ********************************
 from xml.sax.saxutils import escape
-from reportlab.lib import colors
+
+import pymupdf
+import streamlit as st
+from dotenv import load_dotenv
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-    PageBreak,
-)
-# ***************************************
-from dotenv import load_dotenv
-from streamlit_pdf_viewer import pdf_viewer
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 from connect_db import process_pdf
 from chains import ask_question, generate_full_pdf_questions
 
 load_dotenv()
-def questions_to_pdf(title, content):
-    buffer = io.BytesIO()
 
-    doc = SimpleDocTemplate(
+st.set_page_config(
+    page_title="PDF Study Assistant",
+    page_icon="📚",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+# ---------------- Styling ----------------
+st.markdown(
+    """
+    <style>
+      .block-container { padding-top: 1.4rem; padding-bottom: 2rem; max-width: 1600px; }
+      .hero {
+        padding: 1.35rem 1.5rem; border-radius: 18px;
+        background: linear-gradient(120deg, #102a43 0%, #175d72 100%);
+        color: white; margin-bottom: 1rem;
+      }
+      .hero h1 { color: white; margin: 0 0 .35rem 0; font-size: 2rem; }
+      .hero p { color: #e2f1f5; margin: 0; }
+      .metric-card {
+        border: 1px solid rgba(128,128,128,.25); border-radius: 14px;
+        padding: .85rem 1rem; min-height: 88px;
+      }
+      .metric-label { font-size: .82rem; opacity: .75; margin-bottom: .25rem; }
+      .metric-value { font-size: 1.45rem; font-weight: 700; }
+      .section-card {
+        border: 1px solid rgba(128,128,128,.22); border-radius: 16px;
+        padding: 1rem 1.1rem; margin-bottom: .75rem;
+      }
+      div[data-testid="stButton"] button { border-radius: 10px; }
+      div[data-testid="stDownloadButton"] button { border-radius: 10px; }
+      .small-note { font-size: .85rem; opacity: .72; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ---------------- PDF export ----------------
+def questions_to_pdf(title: str, content: str) -> bytes:
+    buffer = io.BytesIO()
+    pdf = SimpleDocTemplate(
         buffer,
         pagesize=A4,
         rightMargin=18 * mm,
@@ -38,445 +68,344 @@ def questions_to_pdf(title, content):
     )
 
     styles = getSampleStyleSheet()
-    styles.add(ParagraphStyle(
-        name="StudyTitle",
-        parent=styles["Title"],
-        alignment=TA_CENTER,
-        spaceAfter=14,
-    ))
-    styles.add(ParagraphStyle(
-        name="StudyBody",
-        parent=styles["BodyText"],
-        leading=15,
-        spaceAfter=8,
-    ))
+    styles.add(
+        ParagraphStyle(
+            name="StudyTitle",
+            parent=styles["Title"],
+            alignment=TA_CENTER,
+            spaceAfter=16,
+        )
+    )
+    styles.add(
+        ParagraphStyle(
+            name="StudyBody",
+            parent=styles["BodyText"],
+            leading=15,
+            spaceAfter=8,
+        )
+    )
 
     story = [
         Paragraph(escape(title), styles["StudyTitle"]),
         Spacer(1, 6),
     ]
 
-    # Simple Markdown formatting ko readable PDF text mein convert karo.
-    for line in content.splitlines():
-        line = line.strip()
-
+    # A small Markdown-to-ReportLab converter for headings, bullets and bold.
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
         if not line:
             story.append(Spacer(1, 5))
             continue
 
         if line.startswith("### "):
-            story.append(Paragraph(
-                escape(line[4:]),
-                styles["Heading3"],
-            ))
+            story.append(Paragraph(escape(line[4:]), styles["Heading3"]))
         elif line.startswith("## "):
-            story.append(Paragraph(
-                escape(line[3:]),
-                styles["Heading2"],
-            ))
+            story.append(Paragraph(escape(line[3:]), styles["Heading2"]))
         elif line.startswith("# "):
-            story.append(Paragraph(
-                escape(line[2:]),
-                styles["Heading1"],
-            ))
+            story.append(Paragraph(escape(line[2:]), styles["Heading1"]))
         else:
             safe_line = escape(line)
-            safe_line = re.sub(
-                r"\*\*(.+?)\*\*",
-                r"<b>\1</b>",
-                safe_line,
-            )
-            story.append(Paragraph(
-                safe_line,
-                styles["StudyBody"],
-            ))
+            safe_line = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe_line)
+            if line.startswith(("- ", "* ")):
+                safe_line = "&#8226; " + safe_line[2:]
+            elif re.match(r"^\d+[\.\)]\s+", line):
+                safe_line = re.sub(r"^(\d+[\.\)])\s+", r"<b>\1</b> ", safe_line)
+            story.append(Paragraph(safe_line, styles["StudyBody"]))
 
-    doc.build(story)
+    pdf.build(story)
     return buffer.getvalue()
 
-st.set_page_config(
-    page_title="PDF Study Assistant",
-    page_icon="📚",
-    layout="wide",
-)
 
-st.title("📚 PDF Study Assistant")
-st.caption("Upload once, reuse stored embeddings, and study with page references.")
-
-# Session state
-defaults = {
+# ---------------- Session state ----------------
+DEFAULTS = {
     "vectorstore": None,
     "chunks": [],
     "pdf_name": None,
     "pdf_bytes": None,
     "file_hash": None,
     "selected_page": 1,
+    "total_pdf_pages": 0,
     "answer": None,
     "answer_pages": [],
     "generated_cache": {},
+    "interview_result": None,
 }
-
-for key, value in defaults.items():
+for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
 
-uploaded_file = st.file_uploader(
-    "Upload a PDF",
-    type=["pdf"],
+# ---------------- Header ----------------
+st.markdown(
+    """
+    <div class="hero">
+      <h1>📚 PDF Study Assistant</h1>
+      <p>Read your PDF, ask questions, prepare exam answers, and revise from one workspace.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-if st.button("📥 Process / Open PDF", disabled=uploaded_file is None):
-    progress = st.progress(0)
-    status = st.empty()
+with st.expander("Upload or switch PDF", expanded=st.session_state.vectorstore is None):
+    uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
+    process_clicked = st.button(
+        "📥 Process / Open PDF",
+        type="primary",
+        disabled=uploaded_file is None,
+        use_container_width=True,
+    )
+
+if process_clicked and uploaded_file is not None:
     try:
-        with st.spinner("Checking for an existing PDF..."):
-            vectorstore, chunks, reused, file_hash = process_pdf(
-                uploaded_file
-            )
+        with st.spinner("Extracting text/OCR and checking stored embeddings..."):
+            vectorstore, chunks, reused, file_hash = process_pdf(uploaded_file)
+            pdf_bytes = uploaded_file.getvalue()
+
+            with pymupdf.open(stream=pdf_bytes, filetype="pdf") as pdf_doc:
+                total_pdf_pages = len(pdf_doc)
 
         st.session_state.vectorstore = vectorstore
         st.session_state.chunks = chunks
         st.session_state.pdf_name = uploaded_file.name
-        st.session_state.pdf_bytes = uploaded_file.getvalue()
+        st.session_state.pdf_bytes = pdf_bytes
         st.session_state.file_hash = file_hash
+        st.session_state.total_pdf_pages = total_pdf_pages
         st.session_state.selected_page = 1
         st.session_state.answer = None
         st.session_state.answer_pages = []
+        st.session_state.generated_cache = {}
+        st.session_state.interview_result = None
 
         if reused:
             st.success(
-                "Existing PDF collection reused. "
-                "No new chunk embeddings were generated."
+                f"Opened existing indexed PDF · {total_pdf_pages} pages · "
+                f"{len(chunks)} stored chunks reused."
             )
         else:
             st.success(
-                f"PDF processed: {len(chunks)} chunks stored."
+                f"PDF processed · {total_pdf_pages} pages · "
+                f"{len(chunks)} text chunks indexed."
             )
-        
     except Exception as exc:
         st.error(f"Could not process PDF: {exc}")
 
 
-if st.session_state.vectorstore is not None:
-    chunks = st.session_state.chunks
+if st.session_state.vectorstore is None:
+    st.info("Upload a PDF and click **Process / Open PDF** to start studying.")
+    st.stop()
 
-    page_numbers = [
-        doc.metadata.get("page")
-        for doc in chunks
-        if isinstance(doc.metadata.get("page"), int)
-    ]
-    total_pages = max(page_numbers, default=0) + 1
 
-    st.caption(
-        f"📄 {st.session_state.pdf_name}  ·  "
-        f"{total_pages} pages  ·  {len(chunks)} chunks"
+# Keep the information useful to the user, without exposing extraction internals.
+chunks = st.session_state.chunks
+pdf_bytes = st.session_state.pdf_bytes
+total_pages = st.session_state.total_pdf_pages or 1
+
+st.markdown(f"### 📄 {st.session_state.pdf_name}")
+col1, col2 = st.columns(2)
+with col1:
+    st.metric("PDF pages", total_pages)
+with col2:
+    st.metric("Study chunks", len(chunks))
+
+
+# ---------------- Main workspace ----------------
+read_tab, ask_tab, study_tab = st.tabs(
+    ["📖 Read PDF", "💬 Ask your PDF", "🎯 Study & Practice"]
+)
+
+with read_tab:
+    st.caption("Scroll through the document to read it. Use your browser zoom controls if needed.")
+    st.download_button(
+        "Download original PDF",
+        data=pdf_bytes,
+        file_name=st.session_state.pdf_name,
+        mime="application/pdf",
     )
 
-    left, right = st.columns([1, 1.1], gap="large")
+    try:
+        from streamlit_pdf_viewer import pdf_viewer
 
-    with left:
-        st.subheader("💬 Ask your PDF")
+        # Render the original PDF directly with the PDF viewer component.
+        # The previous base64 iframe approach is unreliable in Streamlit because
+        # browser sandboxing often prevents the embedded PDF from appearing.
+        pdf_viewer(
+            input=pdf_bytes,
+            width=1200,
+            height=900,
+        )
+    except Exception as exc:
+        st.error("The PDF preview could not be displayed.")
+        st.caption(f"Viewer error: {exc}")
+        st.info("Use the 'Download original PDF' button above to read it in your PDF app.")
 
-        with st.form("question_form"):
-            question = st.text_input(
-                "What do you want to know?"
-            )
-            ask_clicked = st.form_submit_button("Get Answer")
+    with st.expander("View extracted text (optional)"):
+        selected_page = st.number_input(
+            "Page number", min_value=1, max_value=total_pages, value=1, step=1, key="text_page_number"
+        )
+        page_docs = [
+            doc for doc in chunks
+            if doc.metadata.get("page") == int(selected_page)
+        ]
+        if page_docs:
+            for doc in page_docs:
+                st.text(doc.page_content)
+        else:
+            st.info("No searchable text was extracted from this page.")
 
-        if ask_clicked and question.strip():
-            with st.spinner("Finding relevant passages..."):
-                answer, pages = ask_question(
-                    st.session_state.vectorstore,
-                    question.strip(),
-                )
 
-            st.session_state.answer = answer
-            st.session_state.answer_pages = pages
+with ask_tab:
+    st.subheader("Ask questions about this PDF")
+    st.caption("Answers are grounded in retrieved PDF passages and include page references.")
 
-        if st.session_state.answer:
-            st.markdown("### Answer")
-            st.markdown(st.session_state.answer)
+    with st.form("question_form", clear_on_submit=False):
+        question = st.text_input(
+            "Your question",
+            placeholder="e.g. Explain renewable and non-renewable resources",
+        )
+        ask_clicked = st.form_submit_button("Get answer", type="primary")
 
-            pages = st.session_state.answer_pages
-            if pages:
-                st.caption("Open a source page in the PDF viewer:")
-                page_cols = st.columns(min(len(pages), 4))
+    if ask_clicked:
+        if not question.strip():
+            st.warning("Please enter a question.")
+        else:
+            try:
+                with st.spinner("Searching relevant passages..."):
+                    answer, pages = ask_question(
+                        st.session_state.vectorstore,
+                        question.strip(),
+                    )
+                st.session_state.answer = answer
+                st.session_state.answer_pages = pages
+            except Exception as exc:
+                st.error(f"Could not answer the question: {exc}")
 
-                for i, page in enumerate(pages):
-                    with page_cols[i % len(page_cols)]:
-                        if st.button(
-                            f"📖 Open Page {page}",
-                            key=f"answer_page_{page}",
-                        ):
-                            st.session_state.selected_page = page
+    if st.session_state.answer:
+        st.markdown("#### Answer")
+        st.markdown(st.session_state.answer)
 
-        st.divider()
-        st.subheader("🎯 Interview Preparation")
+        pages = st.session_state.answer_pages
+        if pages:
+            st.caption("Open a cited source page:")
+            page_cols = st.columns(min(len(pages), 5))
+            for i, page in enumerate(pages):
+                with page_cols[i % len(page_cols)]:
+                    if st.button(f"📖 Page {page}", key=f"qa_page_{page}"):
+                        st.session_state.selected_page = min(max(1, page), total_pages)
+                        st.toast(f"Selected page {page}. Open the Read PDF tab to view it.")
 
+
+with study_tab:
+    st.subheader("Generate study material")
+    st.write("Create interview/viva questions or longer exam-style answers from the indexed PDF.")
+
+    controls1, controls2 = st.columns(2)
+    with controls1:
+        answer_style = st.selectbox(
+            "Answer length",
+            ["Short", "Mixed", "Detailed"],
+            index=1,
+            help=(
+                "Short: quick revision. Mixed: short definitions and longer explanations "
+                "where useful. Detailed: structured descriptive answers."
+            ),
+        )
+    with controls2:
         number = st.slider(
-            "Number of final questions",
+            "Number of questions",
             min_value=5,
             max_value=30,
             value=10,
         )
-
-        cache_key = (
-            st.session_state.file_hash,
-            number,
+        st.caption(
+            "Detailed answers use more tokens and may take longer. "
+            "Check generated page references against the source."
         )
 
-        if st.button("Generate Interview Questions"):
+    cache_key = (
+        st.session_state.file_hash,
+        answer_style,
+        number,
+    )
+
+    if st.button("✨ Generate study material", type="primary", use_container_width=True):
+        try:
             if cache_key in st.session_state.generated_cache:
-                st.info("Using questions already generated in this session.")
                 result = st.session_state.generated_cache[cache_key]
+                st.info("Loaded previously generated material from this session.")
             else:
                 progress = st.progress(0)
                 status = st.empty()
 
                 def update_progress(done, total):
-                    progress.progress(done / total)
-                    status.write(
-                        f"Analysing PDF: batch {done} of {total}"
+                    progress.progress(done / total if total else 1.0)
+                    status.write(f"Analysing PDF batches: {done} of {total}")
+
+                # Requires generate_full_pdf_questions(..., answer_style=...)
+                # in the updated chains.py.
+                with st.spinner("Generating questions and answers..."):
+                    result = generate_full_pdf_questions(
+                        chunks=chunks,
+                        num_questions=number,
+                        batch_size=8,
+                        progress_callback=update_progress,
+                        max_workers=3,
+                        answer_style=answer_style,
                     )
 
-                try:
-                    with st.spinner(
-                        "Generating questions from PDF batches..."
-                    ):
-                        result = generate_full_pdf_questions(
-                            chunks=chunks,
-                            num_questions=number,
-                            batch_size=8,
-                            progress_callback=update_progress,
-                            max_workers=4,
-                        )
+                st.session_state.generated_cache[cache_key] = result
+                status.success("Generation complete.")
 
-                    st.session_state.generated_cache[cache_key] = result
-                    status.write("Generation complete.")
+            st.session_state.interview_result = result
+            st.session_state.interview_result_key = cache_key
 
-                except Exception as exc:
-                    st.error(f"Question generation failed: {exc}")
-                    result = None
+        except Exception as exc:
+            st.error(f"Study material generation failed: {exc}")
 
-            if result:
-                st.markdown(result)
-                safe_name = "biology_interview_questions"
-                st.download_button(
-                label="📄 Download Questions as PDF",
+    result = st.session_state.get("interview_result")
+    result_key = st.session_state.get("interview_result_key")
+
+    if result and result_key == cache_key:
+        st.markdown("---")
+        st.markdown(result)
+
+        safe_name = re.sub(
+            r"[^a-zA-Z0-9_-]+",
+            "_",
+            st.session_state.pdf_name.rsplit(".", 1)[0],
+        ).strip("_") or "study_material"
+
+        download_col1, download_col2 = st.columns(2)
+        with download_col1:
+            st.download_button(
+                "📄 Download as PDF",
                 data=questions_to_pdf(
-                    "Biology Interview Questions",
+                    f"Study Questions — {st.session_state.pdf_name}",
                     result,
                 ),
-                file_name=f"{safe_name}.pdf",
+                file_name=f"{safe_name}_study_material.pdf",
                 mime="application/pdf",
                 use_container_width=True,
             )
-
+        with download_col2:
             st.download_button(
-                label="📝 Download as Markdown",
+                "📝 Download as Markdown",
                 data=result,
-                file_name=f"{safe_name}.md",
+                file_name=f"{safe_name}_study_material.md",
                 mime="text/markdown",
                 use_container_width=True,
             )
 
+        referenced_pages = sorted({
+            int(page)
+            for page in re.findall(r"\[Page\s+(\d+)\]", result)
+            if 1 <= int(page) <= total_pages
+        })
 
-            st.session_state.interview_result = result
-
-        if st.session_state.get("interview_result"):
-            st.markdown("### Your Questions & Answers")
-            st.markdown(st.session_state.interview_result)
-
-            # Page references in generated questions are clickable too.
-            referenced_pages = sorted({
-                int(page)
-                for page in re.findall(
-                    r"\[Page\s+(\d+)\]",
-                    st.session_state.interview_result,
-                )
-            })
-
-            if referenced_pages:
-                st.caption("Jump to a referenced page:")
-                ref_cols = st.columns(4)
-
-                for i, page in enumerate(referenced_pages):
-                    with ref_cols[i % 4]:
-                        if st.button(
-                            f"📖 Page {page}",
-                            key=f"interview_page_{page}",
-                        ):
-                            st.session_state.selected_page = page
-
-    with right:
-        st.subheader("📄 PDF Viewer")
-
-        st.session_state.selected_page = min(
-            max(1, st.session_state.selected_page),
-            total_pages,
-        )
-
-        selected_page = st.selectbox(
-            "Jump to page",
-            options=list(range(1, total_pages + 1)),
-            key="selected_page",
-        )
-
-        try:
-            pdf_viewer(
-                input=st.session_state.pdf_bytes,
-                pages_to_render=[selected_page],
-                width=700,
-                height=850,
-            )
-        except Exception as exc:
-            st.warning(
-                "PDF preview could not be rendered. "
-                "You can still use the PDF's page references."
-            )
-            st.caption(str(exc))
-else:
-    st.info("Upload a PDF and click **Process / Open PDF** to begin.")
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-from langchain_openai import ChatOpenAI
-
-llm = ChatOpenAI(
-    model="gpt-4o-mini",
-    temperature=0,
-    max_retries=2,
-)
-
-# ---------------- PDF Q&A ----------------
-
-qa_prompt = ChatPromptTemplate.from_template("""
-You are a careful study assistant. Answer using only the supplied PDF context.
-If the answer is not supported, say you could not find it in this PDF.
-Keep the answer clear and concise. Cite source pages exactly as [Page N].
-
-Context:
-{context}
-
-Question:
-{question}
-""")
-
-qa_chain = qa_prompt | llm | StrOutputParser()
-
-
-def ask_question(vectorstore, question):
-    docs = vectorstore.similarity_search(question, k=4)
-    if not docs:
-        return "No relevant content found in the PDF.", []
-
-    context_parts = []
-    pages = set()
-
-    for doc in docs:
-        page = doc.metadata.get("page")
-        page_number = page + 1 if isinstance(page, int) else None
-        label = f"[Page {page_number}]" if page_number else "[Page unknown]"
-        if page_number:
-            pages.add(page_number)
-        context_parts.append(f"{label}\n{doc.page_content}")
-
-    answer = qa_chain.invoke({
-        "context": "\n\n".join(context_parts),
-        "question": question,
-    })
-    return answer, sorted(pages)
-
-
-# ---------------- Interview questions ----------------
-
-batch_prompt = ChatPromptTemplate.from_template("""
-Create 3 distinct interview or viva questions with concise answers from this context.
-Use only the supplied context. Cover important concepts, not minor details.
-Every answer must cite its source page as [Page N].
-Do not add an introduction or extra commentary.
-
-Context:
-{context}
-""")
-
-reduce_prompt = ChatPromptTemplate.from_template("""
-Merge these candidate questions into a concise, non-repetitive set.
-Keep the most useful distinct questions, accurate answers, and [Page N] references.
-Use only the supplied candidates; do not invent facts.
-
-Candidates:
-{candidates}
-""")
-
-final_prompt = ChatPromptTemplate.from_template("""
-Create up to {num_questions} high-quality interview/viva questions with concise answers.
-Cover distinct topics, remove duplicates, preserve [Page N] references, and do not invent facts.
-If the candidates do not support the requested number, return fewer rather than inventing.
-
-Candidates:
-{candidates}
-""")
-
-batch_chain = batch_prompt | llm | StrOutputParser()
-reduce_chain = reduce_prompt | llm | StrOutputParser()
-final_chain = final_prompt | llm | StrOutputParser()
-
-
-def _make_context(docs):
-    parts = []
-    for doc in docs:
-        page = doc.metadata.get("page")
-        page_number = page + 1 if isinstance(page, int) else "unknown"
-        parts.append(f"[Page {page_number}]\n{doc.page_content}")
-    return "\n\n".join(parts)
-
-
-def generate_full_pdf_questions(
-    chunks,
-    num_questions=10,
-    batch_size=8,
-    progress_callback=None,
-    max_workers=4,
-):
-    if not chunks:
-        return "No PDF chunks available."
-
-    batches = [
-        chunks[start:start + batch_size]
-        for start in range(0, len(chunks), batch_size)
-    ]
-    candidates = [None] * len(batches)
-    completed = 0
-
-    # Parallel map stage. Concurrency is bounded to limit API bursts.
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(batch_chain.invoke, {"context": _make_context(batch)}): i
-            for i, batch in enumerate(batches)
-        }
-        for future in as_completed(futures):
-            candidates[futures[future]] = future.result()
-            completed += 1
-            if progress_callback:
-                progress_callback(completed, len(batches))
-
-    candidates = [item for item in candidates if item]
-
-    # Reduce calls only when candidate volume warrants it.
-    while len(candidates) > 4:
-        groups = [
-            candidates[i:i + 4]
-            for i in range(0, len(candidates), 4)
-        ]
-        candidates = [
-            reduce_chain.invoke({"candidates": "\n\n".join(group)})
-            for group in groups
-        ]
-
-    return final_chain.invoke({
-        "num_questions": num_questions,
-        "candidates": "\n\n".join(candidates),
-    })
+        if referenced_pages:
+            st.caption("Jump to a page cited in the generated material:")
+            ref_cols = st.columns(min(5, len(referenced_pages)))
+            for i, page in enumerate(referenced_pages):
+                with ref_cols[i % len(ref_cols)]:
+                    if st.button(f"📖 Page {page}", key=f"study_page_{page}"):
+                        st.session_state.selected_page = page
+                        st.toast(f"Selected page {page}. Open the Read PDF tab to view it.")
